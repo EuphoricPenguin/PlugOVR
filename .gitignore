@@ -1,0 +1,33 @@
+# Rust
+/target/
+**/*.rlib
+**/*.d
+**/rlib-emit
+.cargo-ok
+
+# Build outputs
+/debug/
+/release/
+**/*.pyc
+__pycache__/
+
+# Generated/compiled voices
+bin/compiled_voices/
+
+# OS and editor files
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Local configuration
+.env
+.local
+
+# Output directory
+output/
+
+# Voice audio files (too large for git)
+voices/
