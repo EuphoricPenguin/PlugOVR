@@ -12,15 +12,68 @@ use std::fs;
 use std::process;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use hound::{WavSpec, WavWriter, SampleFormat};
 use midly::Smf;
 
 use plugovr::{load_dictionary, voice::Voice, synth::Synth};
 
-/// Mapping from ARPABET phonemes (CMUdict output) to X-SAMMA phonemes (voice segment names).
-/// This matches the mapping in python/phonology.py.
-const ARPABET_TO_XSAMMA: &[(&str, &str)] = &[
+// ── Phoneme tables (matching C++ g2p.cpp) ──────────────────────────────
+
+/// All known phonemes in X-SAMPA, sorted longest-first for greedy parsing.
+fn all_phonemes() -> Vec<&'static str> {
+    vec![
+        "tS", "dZ", "@`", "oU", "eI", "aI", "OI", "aU",
+        "l", "r", "j", "w",
+        "m", "n", "N", "h", "k", "g", "p", "b", "t", "d",
+        "f", "v", "T", "D", "s", "z", "S", "Z",
+        "{}", "A", "I", "E", "@", "u", "U", "i",
+        "_",
+    ]
+}
+
+/// Vowels (used by VV fixer and is_vowel checks).
+fn vowels() -> HashSet<&'static str> {
+    [
+        "{}", "@`", "A", "I", "E", "@", "u", "U", "i",
+        "oU", "eI", "aI", "OI", "aU",
+    ].iter().cloned().collect()
+}
+
+/// Vowel-to-vowel fixer: insert a glide consonant between adjacent vowels.
+/// Matches C++ k_vvFixers.
+fn vv_fixers() -> HashMap<&'static str, &'static str> {
+    let mut m = HashMap::new();
+    m.insert("i", "j");
+    m.insert("aI", "j");
+    m.insert("eI", "j");
+    m.insert("OI", "j");
+    m.insert("u", "w");
+    m.insert("aU", "w");
+    m.insert("oU", "w");
+    m.insert("@`", "r");
+    m
+}
+
+/// Phoneme aliases (alternative symbols that map to canonical phonemes).
+/// Matches C++ k_phonemeAliases.
+fn phoneme_aliases() -> HashMap<&'static str, Vec<&'static str>> {
+    let mut m = HashMap::new();
+    m.insert("V", vec!["@"]);
+    m.insert("3`", vec!["@`"]);
+    m.insert("O", vec!["A"]);
+    m.insert("&", vec!["{}"]);
+    m.insert("{", vec!["{}"]);
+    m.insert("Or", vec!["oU", "r"]);
+    m.insert("?", vec!["_"]);
+    m.insert(" ", vec!["_"]);
+    m
+}
+
+/// Mapping from ARPABET phonemes (CMUdict output) to X-SAMPA phonemes (voice segment names).
+/// Matches C++ k_arpabetToXSAMPA.
+const ARPABET_TO_XSAMPA: &[(&str, &str)] = &[
     ("AA", "A"),
     ("AE", "{}"),
     ("AH", "@"),
@@ -62,35 +115,282 @@ const ARPABET_TO_XSAMMA: &[(&str, &str)] = &[
     ("ZH", "Z"),
 ];
 
-/// Convert an ARPABET phoneme to X-SAMMA phoneme.
-/// Returns the same phoneme if no mapping exists.
-fn arpabet_to_xsampa(phoneme: &str) -> &str {
-    ARPABET_TO_XSAMMA
-        .iter()
-        .find(|(arp, _)| *arp == phoneme)
-        .map(|(_, xs)| *xs)
-        .unwrap_or(phoneme)
+/// Guess pronunciations for out-of-vocabulary words (matching C++ k_guessPronunciations).
+fn guess_pronunciations() -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut pairs = vec![
+        ("a", vec!["{}"]),
+        ("ai", vec!["aI"]),
+        ("ar", vec!["A", "r"]),
+        ("au", vec!["aU"]),
+        ("augh", vec!["A"]),
+        ("b", vec!["b"]),
+        ("c", vec!["k"]),
+        ("ch", vec!["tS"]),
+        ("d", vec!["d"]),
+        ("e", vec!["E"]),
+        ("ei", vec!["eI"]),
+        ("ee", vec!["i"]),
+        ("ea", vec!["i"]),
+        ("er", vec!["@`"]),
+        ("f", vec!["f"]),
+        ("g", vec!["g"]),
+        ("h", vec!["h"]),
+        ("i", vec!["I"]),
+        ("ie", vec!["aI"]),
+        ("igh", vec!["aI"]),
+        ("j", vec!["dZ"]),
+        ("k", vec!["k"]),
+        ("l", vec!["l"]),
+        ("m", vec!["m"]),
+        ("n", vec!["n"]),
+        ("ng", vec!["N"]),
+        ("o", vec!["oU"]),
+        ("oi", vec!["OI"]),
+        ("oo", vec!["u"]),
+        ("ou", vec!["aU"]),
+        ("ough", vec!["A"]),
+        ("ow", vec!["aU"]),
+        ("p", vec!["p"]),
+        ("q", vec!["k", "w"]),
+        ("r", vec!["r"]),
+        ("s", vec!["s"]),
+        ("sh", vec!["S"]),
+        ("t", vec!["t"]),
+        ("th", vec!["T"]),
+        ("u", vec!["@"]),
+        ("ur", vec!["@`"]),
+        ("v", vec!["v"]),
+        ("w", vec!["w"]),
+        ("x", vec!["k", "s"]),
+        ("y", vec!["j"]),
+        ("y$", vec!["i"]),
+        ("z", vec!["z"]),
+    ];
+    // Sort by key length descending (longest first for greedy matching)
+    pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    pairs
 }
 
-/// Simple G2P wrapper around the dictionary HashMap.
+/// CMUdict exceptions (matching C++ k_cmudictExceptions).
+fn cmudict_exceptions() -> HashMap<&'static str, Vec<&'static str>> {
+    let mut m = HashMap::new();
+    m.insert("and", vec!["{}", "n", "d"]);
+    m.insert("every", vec!["E", "v", "r", "i"]);
+    m.insert("oddvoices", vec!["A", "d", "v", "OI", "s", "E", "z"]);
+    m.insert("chesnokov", vec!["tS", "E", "z", "n", "oU", "k", "A", "v"]);
+    m
+}
+
+/// Convert an ARPABET phoneme to X-SAMPA phoneme, stripping stress markers.
+/// Returns None if no mapping exists.
+fn arpabet_to_xsampa(phoneme: &str) -> Option<&'static str> {
+    let last = phoneme.chars().last()?;
+    let stripped = if last >= '0' && last <= '9' {
+        &phoneme[..phoneme.len() - 1]
+    } else {
+        phoneme
+    };
+    ARPABET_TO_XSAMPA
+        .iter()
+        .find(|(arp, _)| *arp == stripped)
+        .map(|(_, xs)| *xs)
+}
+
+/// Parse a pronunciation string (e.g. from /slashes/) into phonemes.
+/// Matches C++ parsePronunciation.
+fn parse_pronunciation(pronunciation: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut remaining = pronunciation;
+    let aliases = phoneme_aliases();
+    let mut all_phonemes = all_phonemes();
+    // Add alias keys to the phoneme list for parsing
+    for (key, _) in &aliases {
+        all_phonemes.push(key);
+    }
+    // Sort by length descending for greedy matching
+    all_phonemes.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    while !remaining.is_empty() {
+        let mut found = false;
+        for &ph in &all_phonemes {
+            if remaining.len() >= ph.len() && &remaining[..ph.len()] == ph {
+                if let Some(alias_phonemes) = aliases.get(ph) {
+                    result.extend(alias_phonemes.iter().map(|s| s.to_string()));
+                } else {
+                    result.push(ph.to_string());
+                }
+                remaining = &remaining[ph.len()..];
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // Skip unrecognized character
+            remaining = &remaining[1..];
+        }
+    }
+    result
+}
+
+/// Perform the cot-caught merger: /O/ -> /A/ (or /oU/ before /r/).
+/// Matches C++ performCotCaughtMerger.
+fn perform_cot_caught_merger(pronunciation: &mut Vec<String>) {
+    let len = pronunciation.len();
+    for i in 0..len {
+        if pronunciation[i] == "O" {
+            if i + 1 < len && pronunciation[i + 1] == "r" {
+                pronunciation[i] = "oU".to_string();
+            } else {
+                pronunciation[i] = "A".to_string();
+            }
+        }
+    }
+}
+
+/// Fix vowel-vowel diphones by inserting glide consonants.
+/// Matches C++ fixVVDiphones.
+fn fix_vv_diphones(pronunciation: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    let vowels = vowels();
+    let fixers = vv_fixers();
+    let mut last_phoneme = String::new();
+    for phoneme in pronunciation {
+        if vowels.contains(phoneme.as_str()) && fixers.contains_key(last_phoneme.as_str()) {
+            result.push(fixers[last_phoneme.as_str()].to_string());
+        }
+        result.push(phoneme.clone());
+        last_phoneme = phoneme.clone();
+    }
+    result
+}
+
+/// Normalize pronunciation by adding leading/trailing silence markers.
+/// Matches C++ normalizePronunciation.
+fn normalize_pronunciation(pronunciation: Vec<String>) -> Vec<String> {
+    let mut result = Vec::new();
+    if pronunciation.is_empty() {
+        return vec!["_".to_string()];
+    }
+    if pronunciation[0] != "_" {
+        result.push("_".to_string());
+    }
+    let last = pronunciation.last().map(|s| s.to_string());
+    result.extend(pronunciation);
+    if last.as_deref() != Some("_") {
+        result.push("_".to_string());
+    }
+    result
+}
+
+/// Guess pronunciation for out-of-vocabulary words using heuristic rules.
+/// Matches C++ pronounceOOV.
+fn pronounce_oov(word: &str) -> Vec<String> {
+    let guesses = guess_pronunciations();
+    let mut remaining = format!("{}", word);
+    remaining.push('$');
+    let mut pass1 = Vec::new();
+    while !remaining.is_empty() {
+        let mut found = false;
+        for &(key, ref phonemes) in &guesses {
+            if remaining.len() >= key.len() && &remaining[..key.len()] == key {
+                remaining = remaining[key.len()..].to_string();
+                pass1.extend(phonemes.iter().map(|s| s.to_string()));
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            remaining = remaining[1..].to_string();
+        }
+    }
+    // Remove consecutive duplicates
+    let mut pass2 = Vec::new();
+    let mut last: Option<String> = None;
+    for ph in pass1 {
+        if last.as_deref() != Some(&ph) {
+            pass2.push(ph.clone());
+            last = Some(ph);
+        }
+    }
+    pass2
+}
+
+/// Tokenize text into words, handling punctuation and explicit phonetic input.
+/// Matches C++ tokenize().
+fn tokenize(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for island in text.split_whitespace() {
+        if island.starts_with('/') && island.ends_with('/') {
+            // Explicit phonetic input between slashes
+            words.push(island.to_string());
+        } else {
+            let mut current = String::new();
+            for c in island.chars().map(|c| c.to_ascii_lowercase()) {
+                if (c >= 'a' && c <= 'z') || c == '\'' {
+                    current.push(c);
+                } else {
+                    if !current.is_empty() {
+                        words.push(current.clone());
+                        current.clear();
+                    }
+                }
+            }
+            if !current.is_empty() {
+                words.push(current);
+            }
+        }
+    }
+    words
+}
+
+/// Full G2P wrapper around the dictionary HashMap, matching C++ G2P::pronounce().
 struct G2P {
     dict: HashMap<String, Vec<String>>,
 }
 
 impl G2P {
     fn new(dict: HashMap<String, Vec<String>>) -> Self {
+        // Apply CMUdict exceptions
+        let mut dict = dict;
+        for (word, phonemes) in cmudict_exceptions() {
+            dict.insert(word.to_string(), phonemes.iter().map(|s| s.to_string()).collect());
+        }
         G2P { dict }
     }
 
-    /// Look up a word and return its phonemes (stress markers stripped, converted to X-SAMMA).
-    /// Returns None if the word is not in the dictionary.
-    fn pronounce_word(&self, word: &str) -> Option<Vec<String>> {
-        let key = word.to_lowercase()
-            .trim_end_matches(|c: char| c.is_ascii_punctuation())
-            .to_string();
-        let phonemes = self.dict.get(&key)?;
-        let xsampa_phonemes: Vec<String> = phonemes.iter().map(|p| arpabet_to_xsampa(p).to_string()).collect();
-        Some(xsampa_phonemes)
+    /// Pronounce a single word, returning X-SAMPA phonemes.
+    /// Matches C++ G2P::pronounceWord().
+    fn pronounce_word(&self, word: &str) -> Vec<String> {
+        let result = if word.starts_with('/') {
+            // Explicit phonetic input: /phonemes/
+            let inner = &word[1..word.len().saturating_sub(1)];
+            parse_pronunciation(inner)
+        } else if let Some(phonemes) = self.dict.get(word) {
+            // Look up in dictionary
+            let mut result: Vec<String> = phonemes.iter()
+                .filter_map(|p| arpabet_to_xsampa(p))
+                .map(|s| s.to_string())
+                .collect();
+            perform_cot_caught_merger(&mut result);
+            result
+        } else {
+            // Out of vocabulary: guess
+            pronounce_oov(word)
+        };
+        let result = fix_vv_diphones(&result);
+        normalize_pronunciation(result)
+    }
+
+    /// Pronounce a full text string (multiple words).
+    /// Matches C++ G2P::pronounce().
+    fn pronounce(&self, text: &str) -> Vec<String> {
+        let words = tokenize(text);
+        let mut result = Vec::new();
+        for word in words {
+            let pronunciation = self.pronounce_word(&word);
+            result.extend(pronunciation);
+        }
+        result
     }
 }
 
@@ -119,43 +419,33 @@ fn execute_events(
     voice: &Voice,
     events: &[Event],
     total_duration_seconds: f32,
-    segment_indices: &[i32],
     g2p: &G2P,
     lyrics: &str,
     output_wav: &str,
 ) -> Result<(), String> {
     let sample_rate = voice.sample_rate() as f32;
 
-    // Get phonemes from lyrics
-    let mut phoneme_list: Vec<String> = Vec::new();
-    for word in lyrics.split_whitespace() {
-        let clean_word = word.trim_end_matches(|c: char| c.is_ascii_punctuation()).to_lowercase();
-        if let Some(phonemes) = g2p.pronounce_word(&clean_word) {
-            phoneme_list.extend(phonemes);
-        }
-    }
+    // Get phonemes from lyrics using the full G2P pipeline
+    let phoneme_list = g2p.pronounce(lyrics);
 
     let ref_phonemes: Vec<&str> = phoneme_list.iter().map(|s| s.as_str()).collect();
     let seg_indices = voice.convert_phonemes_to_segment_indices(&ref_phonemes);
 
-    // Pre-queue all segments
-    let queue_capacity = seg_indices.len().max(256) as i32;
-    let mem: Box<[i32]> = vec![-1; queue_capacity as usize].into_boxed_slice();
+    // Match C++ exactly: pass the segment indices as the queue memory buffer,
+    // with capacity = len, start = 0, and initial size = len (pre-populated).
+    let queue_capacity = seg_indices.len();
+    let mem: Box<[i32]> = seg_indices.into_boxed_slice();
     let mut synth = Synth::new(
         sample_rate,
         voice,
         mem,
-        queue_capacity as usize,
+        queue_capacity,
         0,
-        0,
+        queue_capacity,
     );
 
     if synth.is_errored() {
         return Err("Synth initialization failed".to_string());
-    }
-
-    for &seg_idx in &seg_indices {
-        synth.queue_segment(seg_idx);
     }
 
     // Allocate output buffer
@@ -164,9 +454,6 @@ fn execute_events(
     total_samples.resize(num_samples, 0);
 
     // Process events in chronological order, matching C++ iterative time tracking.
-    // The C++ code uses (event.seconds - timeInSeconds) * sampleRate to compute
-    // numSamplesToProcess, which avoids cumulative floating-point rounding errors
-    // that would occur with absolute time * sample_rate calculations.
     let mut time_in_samples: usize = 0;
     let mut time_in_seconds: f32 = 0.0;
 
@@ -175,7 +462,6 @@ fn execute_events(
     sorted_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     for (event_time, event) in &sorted_events {
-        // Iterative sample count: matches C++ exactly
         let num_samples_to_process = ((*event_time - time_in_seconds) * sample_rate).max(0.0) as usize;
 
         for _ in 0..num_samples_to_process {
@@ -185,10 +471,8 @@ fn execute_events(
             }
         }
 
-        // Update time using the same iterative approach as C++
         time_in_seconds += num_samples_to_process as f32 / sample_rate;
 
-        // Execute the event
         match event.event_type {
             EventType::NoteOn => {
                 let duration = event.end_seconds - event.seconds;
@@ -215,7 +499,7 @@ fn execute_events(
         time_in_samples += 1;
     }
 
-    // Write WAV file, matching the C++ write16BitMonoWAVFile which writes samples as-is.
+    // Write WAV file
     let spec = WavSpec {
         channels: 1,
         sample_rate: sample_rate as u32,
@@ -249,6 +533,35 @@ fn midi_key_to_freq(key: u8) -> f32 {
 }
 
 // ── MIDI Processing ────────────────────────────────────────────────────
+
+/// Convert a tick to seconds given a tempo track.
+/// Uses cumulative time calculation to handle tempo changes correctly.
+fn tick_to_seconds(
+    abs_tick: u64,
+    tempo_events: &[(u64, f64)], // (tick, seconds_per_tick_at_this_point)
+) -> f64 {
+    let mut total_secs = 0.0f64;
+    let mut prev_tick: u64 = 0;
+    let mut current_spt = 0.0; // seconds per tick
+
+    for &(tick, spt) in tempo_events {
+        if abs_tick <= tick {
+            // The target tick is before this tempo change
+            let delta_ticks = (abs_tick - prev_tick) as f64;
+            total_secs += delta_ticks * current_spt;
+            return total_secs;
+        }
+        let delta_ticks = (tick - prev_tick) as f64;
+        total_secs += delta_ticks * current_spt;
+        prev_tick = tick;
+        current_spt = spt;
+    }
+
+    // After all tempo events
+    let delta_ticks = (abs_tick - prev_tick) as f64;
+    total_secs += delta_ticks * current_spt;
+    total_secs
+}
 
 fn process_midi(
     voice: &Voice,
@@ -297,102 +610,74 @@ fn process_midi(
         eprintln!("Lyrics: {}", lyrics_text);
     }
 
-    // Determine sample rate from voice
-    let sample_rate = voice.sample_rate() as f32;
-
-    // Get ticks per beat and compute seconds for each tick
+    // Get ticks per beat
     let ticks_per_beat = match smf.header.timing {
         midly::Timing::Metrical(u) => u.as_int() as f64,
         midly::Timing::Timecode(..) => return Err("Timecode-style MIDI timing not supported".into()),
     };
 
-    // Use 120 BPM default if no tempo meta message found
-    let mut bpm = 120.0;
-    let mut tempo_found = false;
+    // ── First pass: collect all tempo events across all tracks ──
+    // Build a sorted list of (tick, seconds_per_tick) events.
+    let mut tempo_events: Vec<(u64, f64)> = Vec::new();
+    // Default: 120 BPM = 0.5 seconds per quarter note = 0.5 / ticks_per_beat seconds per tick
+    let default_spt = 0.5 / ticks_per_beat;
+    let mut has_tempo_at_tick_zero = false;
 
-    // First pass: find tempo in the track with notes
-    let mut target_track_index: Option<usize> = None;
-    let mut active_notes: std::collections::HashMap<u8, (u64, f64)> = std::collections::HashMap::new();
-    let mut note_events: Vec<(f64, f64, u8)> = Vec::new(); // (start_sec, end_sec, midi_note)
-
-    for (track_idx, track) in smf.tracks.iter().enumerate() {
+    for track in &smf.tracks {
         let mut abs_tick: u64 = 0;
-        let mut track_bpm = 120.0;
-
         for event in track {
             abs_tick += event.delta.as_int() as u64;
-
-            // Check for tempo meta message
             if let midly::TrackEventKind::Meta(meta) = &event.kind {
                 if let midly::MetaMessage::Tempo(msqn) = meta {
-                    // MIDI tempo = microseconds per quarter note
                     let micros: u32 = (*msqn).into();
-                    track_bpm = 60_000_000.0 / micros as f64;
-                }
-            }
-
-            if let midly::TrackEventKind::Midi { channel, message } = &event.kind {
-                if channel.as_int() != 0 {
-                    continue;
-                }
-
-                match message {
-                    midly::MidiMessage::NoteOn { key, vel } => {
-                        if vel.as_int() != 0 {
-                            active_notes.insert(key.as_int(), (abs_tick, track_bpm));
-                        }
+                    let bpm = 60_000_000.0 / micros as f64;
+                    let seconds_per_tick = 60.0 / (bpm * ticks_per_beat);
+                    if abs_tick == 0 {
+                        has_tempo_at_tick_zero = true;
                     }
-                    midly::MidiMessage::NoteOff { key, .. } => {
-                        let key_val = key.as_int() as u8;
-                        if let Some((start_tick, track_bpm)) = active_notes.remove(&key_val) {
-                            note_events.push((start_tick as f64, abs_tick as f64, key_val));
-                        }
-                    }
-                    _ => {}
+                    tempo_events.push((abs_tick, seconds_per_tick));
                 }
-            }
-        }
-
-        // Count note events
-        if !active_notes.is_empty() {
-            if target_track_index.is_none() {
-                target_track_index = Some(track_idx);
             }
         }
     }
 
-    if !target_track_index.is_some() {
-        // Check if any track has note events
-        for (track_idx, track) in smf.tracks.iter().enumerate() {
-            let mut has_notes = false;
-            for event in track {
-                if let midly::TrackEventKind::Midi { channel, message } = &event.kind {
-                    if channel.as_int() == 0 {
-                        match message {
-                            midly::MidiMessage::NoteOn { .. } | midly::MidiMessage::NoteOff { .. } => {
-                                has_notes = true;
-                                break;
-                            }
-                            _ => {}
+    // Only add default tempo if no tempo event exists at tick 0
+    if !has_tempo_at_tick_zero {
+        tempo_events.push((0, default_spt));
+    }
+
+    // Sort by tick, then by position (first wins for same tick)
+    tempo_events.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // ── Find the track with note events ──
+    let mut target_track_index: Option<usize> = None;
+    for (track_idx, track) in smf.tracks.iter().enumerate() {
+        let mut has_notes = false;
+        for event in track {
+            if let midly::TrackEventKind::Midi { channel, message } = &event.kind {
+                if channel.as_int() == 0 {
+                    match message {
+                        midly::MidiMessage::NoteOn { .. } | midly::MidiMessage::NoteOff { .. } => {
+                            has_notes = true;
+                            break;
                         }
+                        _ => {}
                     }
                 }
             }
-            if has_notes {
-                target_track_index = Some(track_idx);
-                break;
-            }
+        }
+        if has_notes {
+            target_track_index = Some(track_idx);
+            break;
         }
     }
 
     let track_index = target_track_index.unwrap_or(0);
     let track = &smf.tracks[track_index];
 
-    // Second pass: process the target track
+    // ── Second pass: process the target track ──
     let mut abs_tick: u64 = 0;
-    let mut track_bpm = bpm;
     let mut time_of_track_end: Option<f64> = None;
-    let mut active_notes: std::collections::HashMap<u8, f64> = std::collections::HashMap::new(); // midi_note -> start_time
     let mut notes_on: Vec<u8> = Vec::new(); // stack of currently playing notes
 
     // Collect events: each event is (time_seconds, event_type, frequency, end_time_or_0)
@@ -402,17 +687,10 @@ fn process_midi(
     for event in track {
         abs_tick += event.delta.as_int() as u64;
 
-        // Check for tempo changes
+        // Check for end of track
         if let midly::TrackEventKind::Meta(meta) = &event.kind {
-            if let midly::MetaMessage::Tempo(msqn) = meta {
-                let micros: u32 = (*msqn).into();
-                track_bpm = 60_000_000.0 / micros as f64;
-            }
             if matches!(meta, midly::MetaMessage::EndOfTrack) {
-                let tick = abs_tick as f64;
-                let ticks_per_sec = track_bpm / 60.0 * ticks_per_beat;
-                let sec = tick / ticks_per_sec;
-                time_of_track_end = Some(sec);
+                time_of_track_end = Some(tick_to_seconds(abs_tick, &tempo_events));
             }
         }
 
@@ -424,12 +702,28 @@ fn process_midi(
             match message {
                 midly::MidiMessage::NoteOn { key, vel } => {
                     if vel.as_int() == 0 {
+                        // Note-on with velocity 0 is equivalent to note-off
+                        let midi_note = key.as_int() as u8;
+                        let time_sec = tick_to_seconds(abs_tick, &tempo_events);
+
+                        notes_on.retain(|&n| n != midi_note);
+
+                        if let Some(start_time) = melisma_start {
+                            if notes_on.is_empty() {
+                                events.push((start_time, EventType::NoteOn, 0.0, time_sec as f32));
+                                melisma_start = None;
+                            }
+                        }
+
+                        if !notes_on.is_empty() {
+                            let top_note = notes_on[notes_on.len() - 1];
+                            let freq = midi_key_to_freq(top_note);
+                            events.push((time_sec, EventType::SetTargetFrequency, freq as f32, 0.0));
+                        }
                         continue;
                     }
                     let midi_note = key.as_int() as u8;
-                    let tick = abs_tick as f64;
-                    let ticks_per_sec = track_bpm / 60.0 * ticks_per_beat;
-                    let time_sec = tick / ticks_per_sec;
+                    let time_sec = tick_to_seconds(abs_tick, &tempo_events);
 
                     if notes_on.is_empty() {
                         // Start of a melisma - queue the noteOn event
@@ -437,16 +731,13 @@ fn process_midi(
                     }
 
                     notes_on.push(midi_note);
-                    active_notes.insert(midi_note, time_sec);
 
                     let freq = midi_key_to_freq(midi_note) as f32;
                     events.push((time_sec, EventType::SetTargetFrequency, freq, 0.0));
                 }
                 midly::MidiMessage::NoteOff { key, .. } => {
                     let midi_note = key.as_int() as u8;
-                    let tick = abs_tick as u64;
-                    let ticks_per_sec = track_bpm / 60.0 * ticks_per_beat;
-                    let time_sec = tick as f64 / ticks_per_sec as f64;
+                    let time_sec = tick_to_seconds(abs_tick, &tempo_events);
 
                     notes_on.retain(|&n| n != midi_note);
 
@@ -462,7 +753,7 @@ fn process_midi(
                         // Switch to the new top note
                         let top_note = notes_on[notes_on.len() - 1];
                         let freq = midi_key_to_freq(top_note);
-                        events.push((time_sec as f64, EventType::SetTargetFrequency, freq as f32, 0.0));
+                        events.push((time_sec, EventType::SetTargetFrequency, freq as f32, 0.0));
                     }
                 }
                 _ => {}
@@ -486,7 +777,6 @@ fn process_midi(
         voice,
         &synth_events,
         total_duration.max(1.0),
-        &vec![], // Not used in this approach - phonemes come from lyrics
         g2p,
         &lyrics_text,
         output_wav,
@@ -644,22 +934,5 @@ fn main() {
             eprintln!("Error: {}", e);
             process::exit(1);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_midi_key_to_freq() {
-        // MIDI 69 = A4 = 440 Hz
-        assert_eq!(midi_key_to_freq(69), 440.0);
-        // MIDI 60 = Middle C, should be ~261.63 Hz
-        let freq_c4 = midi_key_to_freq(60);
-        assert!(freq_c4 > 260.0 && freq_c4 < 263.0);
-        // MIDI 72 = C5 = ~523.25 Hz
-        let freq_c5 = midi_key_to_freq(72);
-        assert!(freq_c5 > 520.0 && freq_c5 < 526.0);
     }
 }
