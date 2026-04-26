@@ -281,11 +281,23 @@ impl<'a> Synth<'a> {
             result += self.grains[i].process() as i32;
         }
 
-        // Clamp to i32 range (int32 in C++ code)
-        if result > i32::MAX {
-            result = i32::MAX;
-        } else if result < i32::MIN {
-            result = i32::MIN;
+        // CRITICAL: C++ clamps to int16_t range, NOT int32_t range.
+        // See liboddvoices.cpp lines 507-511:
+        //   if (result > std::numeric_limits<int16_t>::max()) {
+        //       result = std::numeric_limits<int16_t>::max();
+        //   } else if (result < std::numeric_limits<int16_t>::min()) {
+        //       result = std::numeric_limits<int16_t>::min();
+        //   }
+        // This ensures the summed grain output stays within ±32767,
+        // matching the original C++ behavior exactly. The old Rust code
+        // clamped to i32::MIN/i32::MAX which allowed amplitudes up to
+        // ~2 billion — causing the loud peaking and buzzy artifacts.
+        const I16_MAX: i32 = i16::MAX as i32;
+        const I16_MIN: i32 = i16::MIN as i32;
+        if result > I16_MAX {
+            result = I16_MAX;
+        } else if result < I16_MIN {
+            result = I16_MIN;
         }
 
         result
@@ -454,10 +466,14 @@ impl<'a> Synth<'a> {
     }
 
     /// Get the wavetable offset for a segment at a given time.
-    fn get_offset(&self, segment: i32, segment_time: f32) -> usize {
+    ///
+    /// Returns -1 (as i32) for silent segments (0 frames), matching C++ behavior.
+    /// The C++ code returns int, and returns -1 for silent segments.
+    /// The caller checks offset >= 0 before using it.
+    fn get_offset(&self, segment: i32, segment_time: f32) -> i32 {
         let segment_num_frames = self.voice.segment_num_frames(segment as usize);
         if segment_num_frames == 0 {
-            return 0;
+            return -1;  // Match C++: return -1 for silent/invalid segments
         }
         let frame_index = (segment_time * self.original_f0) as i32;
         let frame_index = if frame_index < 0 {
@@ -465,9 +481,9 @@ impl<'a> Synth<'a> {
         } else {
             frame_index % segment_num_frames
         };
-        let segment_offset = self.voice.segment_offset(segment as usize) as usize;
+        let segment_offset = self.voice.segment_offset(segment as usize);
         let offset = segment_offset
-            + (frame_index as usize) * (self.voice.grain_length() as usize);
+            + (frame_index as i32) * (self.voice.grain_length() as i32);
         offset
     }
 }
