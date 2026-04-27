@@ -2,8 +2,6 @@
 
 <img src="image.png" alt="Screenshot" width="300">
 
----
-
 **A pure Rust port, packaged as an audio plugin, of [OddVoices](https://gitlab.com/oddvoices/oddvoices/), a singing synthesizer for General American English.**
 
 ### What is this?
