@@ -5,12 +5,13 @@
 **A pure Rust port, packaged as an audio plugin, of [OddVoices](https://gitlab.com/oddvoices/oddvoices/), a singing synthesizer for General American English.**
 
 ### What is this?
-A Vocaloid or UTAU-like vocal synth that can be used directly in your DAW of choice as a VST3. The underlying engine that powers PlugOVR, OddVoices, is built around automatic phonemization, meaning all you have to provide is plain English lyrics and the engine will do the heavy lifting of interpreting the pronounciation. Both the voice samples and pronounciation data are public domain, so this plugin should yield output that is public domain as well.
 
-The 0.1 version of this project was written using a fully-local LLM toolchain described in the subscript. For the first time, I was able to use fully-offline tools, including the LLM itself, to port C++ code to Rust with little intervention on my part. Porting the OddVoices synth engine to Rust made it trivial to use NIH-Plug to package it as an audio plugin.
+This is a Vocaloid or UTAU-like vocal synth that can be used directly in your DAW of choice as a VST3. The underlying engine that powers PlugOVR, OddVoices, is built around automatic phonemization, meaning all you have to provide is plain English lyrics, and the engine will do the heavy lifting of interpreting the pronunciation. Both the voice samples and pronunciation data are public domain, so this plugin should yield output that is public domain as well.
+
+The 0.1 version of this project was written using a fully-local LLM toolchain described in the subscript. For the first time, I was able to use fully offline tools, including the LLM itself, to port C++ code to Rust with little intervention on my part. Porting the OddVoices synth engine to Rust made it trivial to use NIH-Plug to package it as an audio plugin.
 
 ### How do I use it?
-Choose a voice, paste in your lyrics using the paste button, and you're good to go. The plugin will automatically advance through the lyrics with each successive note played. Since it's fairly easy to have sync issues with this setup, I added an automatable parameter to the plugin called Reset. If you automate it as shown below, the plugin will now know where the start of your music is. All you have to do is automate a pure `1.0` value for a short period and the plugin will reset to the start of the lyrics. **Make sure to keep a copy of your lyrics somewhere else, as PlugOVR provides no way to edit, save, or re-copy your lyrics. The purpose of the text box is purely to see what text has been provided to the plugin.**
+Choose a voice, paste in your lyrics using the paste button, and you're good to go. The plugin will automatically advance through the lyrics with each successive note played. Since it's fairly easy to have sync issues with this setup, I added an automatable parameter to the plugin called Reset. If you automate it as shown below, the plugin will now know where the start of your music is. All you have to do is automate a pure `1.0` value for a short period, and the plugin will reset to the start of the lyrics. **Make sure to keep a copy of your lyrics somewhere else, as PlugOVR provides no way to edit, save, or re-copy your lyrics. The purpose of the text box is purely to see what text has been provided to the plugin.**
 
 <img src="image-1.png" alt="Reset example" width="200">
 
