@@ -68,6 +68,16 @@ impl Grain {
         self.active = true;
     }
 
+    /// Reset this grain to an inactive state, silencing it immediately.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.active = false;
+        self.read_pos = 0.0;
+        self.offset1 = -1;
+        self.offset2 = -1;
+        self.crossfade = 0.0;
+    }
+
     /// Process one sample from this grain.
     ///
     /// Returns the audio sample as an i16 value.

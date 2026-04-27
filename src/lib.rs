@@ -1,20 +1,26 @@
-// OddVoices synthesizer — Rust port
+// OddVoices synthesizer — VST3/CLAP plugin
 //
 // This crate provides a PSOLA (Pitch Synchronous Overlap Add) singing
-// synthesizer for General American English, ported from C++ to Rust.
+// synthesizer for General American English, wrapped as a VST3/CLAP plugin
+// using nih-plug.
 
 pub mod deque;
+pub mod editor;
+pub mod g2p;
 pub mod grain;
-pub mod phonetics;
+pub mod mpron;
 pub mod pitch;
+pub mod plugin;
 pub mod synth;
 pub mod voice;
 
 // Re-export public API
 pub use deque::Deque;
+pub use g2p::G2P;
 pub use grain::Grain;
-pub use phonetics::{load_dictionary, strip_stress_marker};
+pub use mpron::load_dictionary;
 pub use pitch::Pitch;
+pub use plugin::OddVoices;
 pub use synth::Synth;
 pub use voice::Voice;
 
@@ -24,7 +30,6 @@ mod tests {
     use crate::pitch::Pitch;
     use crate::grain::Grain;
     use crate::voice::Voice;
-    use crate::phonetics::{load_dictionary, strip_stress_marker};
 
     // ===== Deque Tests =====
 
@@ -318,103 +323,6 @@ mod tests {
         assert_eq!(voice.num_segments(), 0);
         assert_eq!(voice.segment_to_segment_index("a"), None);
         assert_eq!(voice.segment_index_to_segment(0), None);
-    }
-
-    // ===== Sine Table Tests =====
-
-    #[test]
-    fn test_sine_table_zeros() {
-        // Sine table[0] should be ~0
-        // We can't access SINE_TABLE directly since it's const,
-        // but we can verify via sine behavior
-        let mut pitch = Pitch::new(48000.0);
-        pitch.set_frequency_immediate(0.0); // Won't produce sine, but won't panic
-    }
-
-    // ===== Phonetics Tests =====
-
-    #[test]
-    fn test_phonetics_strip_marker_no_suffix() {
-        assert_eq!(strip_stress_marker("AH"), "AH");
-        assert_eq!(strip_stress_marker("NG"), "NG");
-        assert_eq!(strip_stress_marker("EH"), "EH");
-        assert_eq!(strip_stress_marker("YH1"), "YH");
-    }
-
-    #[test]
-    fn test_phonetics_strip_marker_all_stress_levels() {
-        assert_eq!(strip_stress_marker("AH0"), "AH");
-        assert_eq!(strip_stress_marker("AH1"), "AH");
-        assert_eq!(strip_stress_marker("AH2"), "AH");
-        assert_eq!(strip_stress_marker("AE1"), "AE");
-        assert_eq!(strip_stress_marker("AO2"), "AO");
-    }
-
-    #[test]
-    #[ignore] // Integration test — requires the CMUdict file to be present at build time
-    fn test_phonetics_load_dictionary_from_real_file() {
-        // The CMUdict is in PlugOVR/bin/cmudict-0.7b (copied during setup)
-        // Use an absolute path based on the Cargo manifest directory
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let mut dict_path = std::path::PathBuf::from(manifest_dir);
-        dict_path.push("bin");
-        dict_path.push("cmudict-0.7b");
-        let dict = load_dictionary(dict_path.to_str().unwrap());
-        // Should have loaded many entries
-        assert!(dict.len() > 100, "Expected at least 100 entries in dictionary, got {}", dict.len());
-    }
-
-    #[test]
-    #[ignore] // Integration test — requires the CMUdict file to be present at build time
-    fn test_phonetics_word_lookup() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let mut dict_path = std::path::PathBuf::from(manifest_dir);
-        dict_path.push("bin");
-        dict_path.push("cmudict-0.7b");
-        let dict = load_dictionary(dict_path.to_str().unwrap());
-        // Some common words should be in the dictionary
-        assert!(dict.contains_key("the"), "Expected 'the' in dictionary");
-        assert!(dict.contains_key("and"), "Expected 'and' in dictionary");
-    }
-
-    #[test]
-    fn test_phonetics_dictionary_returns_normalized_phonemes() {
-        // Create a temp dictionary to test phoneme normalization
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let tmp = NamedTempFile::new().unwrap();
-        let mut f = tmp.as_file();
-        f.write_all(b"HALLOWEEN  AH0 L OW1 Y UW0 M IY0 N\n").unwrap();
-        // Note: PHONEME in the dictionary format is F OW1 N IY0 M (N is included as a phoneme)
-        f.write_all(b"PHONEME  F OW1 N IY0 M\n").unwrap();
-
-        let dict = load_dictionary(tmp.path().to_str().unwrap());
-
-        // HALLOWEEN phonemes: AH L OW Y UW M IY N
-        let expected_halloween: Vec<String> = vec!["AH".to_string(), "L".to_string(), "OW".to_string(), "Y".to_string(), "UW".to_string(), "M".to_string(), "IY".to_string(), "N".to_string()];
-        assert_eq!(dict.get("halloween"), Some(&expected_halloween));
-
-        // PHONEME phonemes: F OW N IY M (the 'N' is a valid phoneme in the input)
-        let expected_phoneme: Vec<String> = vec!["F".to_string(), "OW".to_string(), "N".to_string(), "IY".to_string(), "M".to_string()];
-        assert_eq!(dict.get("phoneme"), Some(&expected_phoneme));
-    }
-
-    #[test]
-    fn test_phonetics_empty_phonemes_ignored() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let tmp = NamedTempFile::new().unwrap();
-        let mut f = tmp.as_file();
-        f.write_all(b"VALID  AH1 B\n").unwrap();
-        f.write_all(b"\n").unwrap(); // empty line
-        f.write_all(b"; comment\n").unwrap();
-
-        let dict = load_dictionary(tmp.path().to_str().unwrap());
-
-        assert_eq!(dict.len(), 1);
-        assert!(dict.get("valid").is_some());
     }
 
     // ===== Integration: Deque + Pitch Together =====

@@ -325,6 +325,33 @@ impl<'a> Synth<'a> {
         self.note_off = true;
     }
 
+    /// Immediately stop all sound and reset the synth to an inactive state.
+    /// This clears the segment queue, silences all grains, and forces the synth to go silent.
+    pub fn force_stop(&mut self) {
+        self.segment_queue.clear();
+        self.segment = self.silent_segment_index;
+        self.segment_time = 0.0;
+        self.segment_length = 0.0;
+        self.old_segment = self.silent_segment_index;
+        self.old_segment_time = 0.0;
+        self.crossfade = 0.0;
+        self.crossfade_ramp = 0.0;
+        self.note_on = false;
+        self.note_off = false;
+        self.syllable_time_remaining = 0.0;
+        // Reset all grains to silence any lingering audio from the previous note
+        for grain in &mut self.grains {
+            grain.reset();
+        }
+    }
+
+    /// Clear the segment queue without stopping the current segment.
+    /// Used on note-off to prevent further syllables from playing
+    /// while allowing the current syllable's trailing consonants to finish.
+    pub fn clear_queue(&mut self) {
+        self.segment_queue.clear();
+    }
+
     /// Return true if the Synth is currently playing a segment, and false otherwise.
     /// A Synth will automatically go inactive when the queue runs out and the final
     /// segment finishes playing.

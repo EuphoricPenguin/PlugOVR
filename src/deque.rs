@@ -82,4 +82,10 @@ impl<T: Copy + Default> Deque<T> {
     pub fn peek(&self, index: usize) -> T {
         self.get(index)
     }
+
+    /// Clear all elements from the deque.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.size = 0;
+    }
 }
