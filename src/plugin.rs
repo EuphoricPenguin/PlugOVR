@@ -45,7 +45,8 @@ pub struct OddVoicesParams {
 impl Default for OddVoicesParams {
     fn default() -> Self {
         Self {
-            editor_state: nih_plug_egui::EguiState::from_size(500, 450),
+            editor_state: nih_plug_egui::EguiState::from_size(400, 280),
+
             gain: FloatParam::new(
                 "Gain",
                 util::db_to_gain(0.0),
