@@ -2,7 +2,7 @@
 
 **A VST3 plugin pure Rust port of [OddVoices](https://gitlab.com/oddvoices/oddvoices/), a singing synthesizer for General American English, based on diphone concatenation with PSOLA (Pitch Synchronous Overlap Add).**
 
-To get it working, copy the [voices](https://gitlab.com/oddvoices/oddvoices/-/tree/develop/voices?ref_type=heads) folder to the main directory after cloning this repo. Install Python and Rustup. Run `pip -r requirements.txt` and  `python compile_voices.py` to build the voice binaries. After that, run `cargo build` to build the project.
+To get it working, copy the [voices](https://gitlab.com/oddvoices/oddvoices/-/tree/develop/voices?ref_type=heads) folder to the main directory after cloning this repo. Install Python and Rustup. Run `pip -r requirements.txt` and  `python compile_voices.py` to build the voice binaries. After that, run `.\build_vst3.bat` to build the project.
 
 ### Licensing
 PlugOVR, a derivative of OddVoices, is licensed under the Apache-2.0 License.
