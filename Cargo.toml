@@ -3,6 +3,7 @@ name = "plugovr"
 version = "0.3.0"
 edition = "2021"
 description = "OddVoices singing synthesizer - VST3/CLAP plugin"
+authors = ["EuphoricPenguin"]
 
 [dependencies]
 # Audio plugin framework (not on crates.io, use git)
