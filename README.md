@@ -1,6 +1,6 @@
 ## PlugOVR
 
-<img src="image.png" alt="Screenshot" width="300">
+<img src="image-3.png" alt="Screenshot" width="300">
 
 **A pure Rust port, packaged as an audio plugin, of [OddVoices](https://gitlab.com/oddvoices/oddvoices/), a singing synthesizer for General American English.**
 
@@ -18,7 +18,7 @@ Choose a voice, paste in your lyrics using the paste button, and you're good to 
 
 Also worth noting that this is a real-time plugin, so it lacks the "look-ahead" functionality of the CLI/online semi-real time engine. Practically, it means you should shorten your notes slightly for a more natural sound and to combat lyric drift.
 
-<img src="image-2.png" alt="Reset example" width="300">
+<img src="image-2.png" alt="Notes example" width="300">
 
 ### How do I install it or build it?
 
