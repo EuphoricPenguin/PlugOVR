@@ -18,7 +18,6 @@ pub mod voice;
 pub use deque::Deque;
 pub use g2p::G2P;
 pub use grain::Grain;
-pub use mpron::load_dictionary;
 pub use pitch::Pitch;
 pub use plugin::OddVoices;
 pub use synth::Synth;

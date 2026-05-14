@@ -122,19 +122,15 @@ fn resolve_voice_path(voice_name: &str) -> PathBuf {
         return dev_path;
     }
 
-    // Fall back to relative to the executable
+    // Look alongside the executable (portable deployment)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let exe_path = exe_dir
-                .join("compiled_voices")
-                .join(format!("{}.voice", voice_name));
-            if exe_path.exists() {
-                return exe_path;
-            }
+            let exe_path = exe_dir.join(format!("{}.voice", voice_name));
+            return exe_path;
         }
     }
 
-    // Last resort: just return the dev path anyway
+    // Last resort: return the dev path anyway
     dev_path
 }
 

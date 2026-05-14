@@ -359,6 +359,11 @@ impl<'a> Synth<'a> {
         self.segment != self.silent_segment_index
     }
 
+    /// Return true if the segment queue is empty.
+    pub fn queue_empty(&self) -> bool {
+        self.segment_queue.empty()
+    }
+
     /// Immediately set fundamental frequency in Hertz.
     pub fn set_frequency_immediate(&mut self, frequency: f32) {
         self.pitch.set_frequency_immediate(frequency);

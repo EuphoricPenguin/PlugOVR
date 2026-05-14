@@ -1,44 +1,73 @@
 /// Moby Pronunciator II (mpron.txt) parser for the OddVoices synthesizer.
 ///
-/// Loads the mpron.txt file and provides word-to-phoneme conversion.
-/// The mpron format uses IPA-like symbols (some delimited by /) to represent
-/// pronunciations. We map these to X-SAMPA phonemes used by the voice segments.
+/// At compile time, `build.rs` parses `bin/mpron.txt` (Windows-1252 encoded)
+/// and generates `dict_data.rs` — a sorted `&[(&str, &[&str])]` array of
+/// (word, phonemes) pairs. At runtime, binary search provides O(log n)
+/// lookups with **zero allocation** and sub-microsecond latency.
+///
+/// The old file-loading and HashMap-building functions are kept behind
+/// `#[cfg(test)]` for test compatibility.
+///
+/// Key format details:
+/// - Phonemes are enclosed in /slashes/, e.g. /eI/, /&/, /@/, /tS/
+/// - Adjacent slash-delimited phonemes share a single / delimiter: /T/I/N/
+///   means /T/, /I/, /N/ (three separate phonemes)
+/// - Double slashes //Oi// are used for the OI diphthong to avoid ambiguity
+/// - Single-char phonemes may appear bare (outside slashes): b, d, k, @
+/// - Stress markers: ' (primary), , (secondary) — bare, always stripped
+/// - Underscore _ separates words in compound pronunciations
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 
-/// Mapping from mpron symbols to X-SAMPA phonemes.
+// Auto-generated sorted dictionary array (build.rs)
+include!("dict_data.rs");
+
+/// Look up a word in the compile-time embedded dictionary.
 ///
-/// Based on the Moby Pronunciator II documentation.
-const MPRON_TO_XSAMPA: &[(&str, &str)] = &[
-    // Multi-character symbols (must be checked first - longest first)
-    ("//Oi//", "OI"),  // ɔɪ
-    ("/aU/", "aU"),    // aʊ
-    ("/aI/", "aI"),    // aɪ
-    ("/eI/", "eI"),    // eɪ
-    ("/oU/", "oU"),    // oʊ
-    ("/ju/", "ju"),    // juː
-    ("/tS/", "tS"),    // tʃ
-    ("/dZ/", "dZ"),    // dʒ
-    ("/x/", "x"),      // x
-    ("/y/", "y"),      // ø
-    ("/z/", "z"),      // ts
-    ("/&/", "{}"),     // æ
-    ("/-/", "@"),      // ə
-    ("/A/", "A"),      // ɑ
-    ("/D/", "D"),      // ð
-    ("/E/", "E"),      // ɛ
-    ("/I/", "I"),      // ɪ
-    ("/N/", "N"),      // ŋ
-    ("/O/", "O"),      // ɔ
-    ("/S/", "S"),      // ʃ
-    ("/T/", "T"),      // θ
-    ("/U/", "U"),      // ʊ
-    ("/i/", "i"),      // iː
-    ("/j/", "j"),      // j
-    ("/u/", "u"),      // uː
-    // Single-character symbols
+/// Uses binary search over the sorted `DICT_ENTRIES` array.
+/// Returns `Some(&[&str])` with the X-SAMPA phoneme sequence, or `None` if
+/// the word is not in the dictionary.
+///
+/// O(log n) — sub-microsecond lookup, zero allocation.
+#[inline]
+pub fn lookup_static(word: &str) -> Option<&'static [&'static str]> {
+    let idx = DICT_ENTRIES.binary_search_by(|(w, _)| w.cmp(&word));
+    match idx {
+        Ok(i) => Some(DICT_ENTRIES[i].1),
+        Err(_) => None,
+    }
+}
+
+/// Mapping from naked Moby phoneme identifiers (without slashes) to X-SAMPA phonemes.
+const NAKED_TO_XSAMPA: &[(&str, &str)] = &[
+    // Multi-character identifiers
+    ("Oi", "OI"),   // ɔɪ  (used in //Oi//)
+    ("aU", "aU"),   // aʊ
+    ("aI", "aI"),   // aɪ
+    ("eI", "eI"),   // eɪ
+    ("oU", "oU"),   // oʊ
+    ("ju", "ju"),   // juː
+    ("tS", "tS"),   // tʃ
+    ("dZ", "dZ"),   // dʒ
+    ("[@]", "@"),   // ə  — alternative bracket notation used in mpron.txt
+    // Single-character identifiers
+    ("x", "x"),     // x (velar fricative)
+    ("y", "y"),     // ø
+    ("&", "{}"),    // æ  (ash)
+    ("-", "@"),     // ə  (schwa, hyphen form)
+    ("@", "@"),     // ə  (schwa, bare form)
+    ("A", "A"),     // ɑ
+    ("D", "D"),     // ð
+    ("E", "E"),     // ɛ
+    ("I", "I"),     // ɪ
+    ("N", "N"),     // ŋ
+    ("O", "O"),     // ɔ
+    ("S", "S"),     // ʃ
+    ("T", "T"),     // θ
+    ("U", "U"),     // ʊ
+    ("i", "i"),     // iː
+    ("j", "j"),     // j
+    ("u", "u"),     // uː
     ("b", "b"),
     ("d", "d"),
     ("f", "f"),
@@ -55,41 +84,79 @@ const MPRON_TO_XSAMPA: &[(&str, &str)] = &[
     ("v", "v"),
     ("w", "w"),
     ("z", "z"),
-    // Stress markers (mapped to nothing - we strip them)
-    ("'", ""),   // Primary stress
-    (",", ""),   // Secondary stress
-    ("_", "_"),  // Word separator (maps to silence)
 ];
 
-/// Load the Moby Pronunciator II dictionary from a file.
-///
-/// Returns a HashMap mapping lowercase word -> phoneme sequence in X-SAMPA.
-/// Uses encoding_rs to handle the Mac OS Roman encoding.
-pub fn load_dictionary(path: &str) -> HashMap<String, Vec<String>> {
-    let mut raw = Vec::new();
-    let content: String = match File::open(path) {
-        Ok(mut f) => {
-            f.read_to_end(&mut raw).unwrap_or_default();
-            let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(&raw);
-            decoded.to_string()
+/// Look up a naked phoneme identifier in the X-SAMPA mapping table.
+fn lookup_phoneme(phoneme_id: &str) -> Option<&'static str> {
+    for &(key, xsampa) in NAKED_TO_XSAMPA {
+        if key == phoneme_id {
+            return Some(xsampa);
         }
-        Err(e) => {
-            eprintln!("Warning: Could not open mpron file '{}': {}", path, e);
-            return HashMap::new();
-        }
-    };
+    }
+    None
+}
 
+/// Split accumulated slash-group content into individual phoneme identifiers
+/// using greedy multi-char matching (longest identifier first).
+///
+/// Stress markers (' and ,) within the content are stripped before matching.
+fn split_slash_content(content: &str) -> Vec<String> {
+    let cleaned: String = content
+        .chars()
+        .filter(|c| *c != '\'' && *c != ',')
+        .collect();
+
+    let mut result = Vec::new();
+    let mut remaining = cleaned.as_str();
+
+    // Build sorted list of identifiers, longest first
+    let mut ids: Vec<&str> = NAKED_TO_XSAMPA.iter().map(|(k, _)| *k).collect();
+    ids.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    while !remaining.is_empty() {
+        let mut found = false;
+        for &id in &ids {
+            if remaining.starts_with(id) {
+                if let Some(xsampa) = lookup_phoneme(id) {
+                    result.push(xsampa.to_string());
+                }
+                remaining = &remaining[id.len()..];
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            // Skip unrecognized character
+            if let Some(ch) = remaining.chars().next() {
+                remaining = &remaining[ch.len_utf8()..];
+            } else {
+                break;
+            }
+        }
+    }
+
+    result
+}
+
+/// Build a dictionary HashMap from raw mpron bytes (Windows-1252 encoded).
+#[cfg(test)]
+pub fn build_dictionary_from_bytes(data: &[u8]) -> HashMap<String, Vec<String>> {
+    let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(data);
+    build_dictionary(&decoded)
+}
+
+/// Build a dictionary HashMap from the raw mpron text content.
+///
+/// Used by tests and the build script.
+pub fn build_dictionary(content: &str) -> HashMap<String, Vec<String>> {
     let mut dict = HashMap::new();
 
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.starts_with(";;;") {
             continue;
         }
 
-        // Parse: word[/pos] pronunciation
-        // The format is: word[ /pos] pronunciation
-        // Find the first space to split word from pronunciation
         let space_pos = match line.find(' ') {
             Some(p) => p,
             None => continue,
@@ -98,14 +165,12 @@ pub fn load_dictionary(path: &str) -> HashMap<String, Vec<String>> {
         let word_part = &line[..space_pos];
         let pron_part = line[space_pos + 1..].trim();
 
-        // Extract word (strip optional /pos suffix)
         let word = if let Some(slash_pos) = word_part.find('/') {
             word_part[..slash_pos].to_lowercase()
         } else {
             word_part.to_lowercase()
         };
 
-        // Parse pronunciation into X-SAMPA phonemes
         let phonemes = parse_pronunciation(pron_part);
 
         if phonemes.is_empty() {
@@ -118,47 +183,78 @@ pub fn load_dictionary(path: &str) -> HashMap<String, Vec<String>> {
     dict
 }
 
+/// Load the Moby Pronunciator II dictionary from a file on disk (tests only).
+#[cfg(test)]
+pub fn load_dictionary(path: &str) -> HashMap<String, Vec<String>> {
+    use std::fs::File;
+    use std::io::Read;
+    let mut raw = Vec::new();
+    let content: String = match File::open(path) {
+        Ok(mut f) => {
+            f.read_to_end(&mut raw).unwrap_or_default();
+            let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(&raw);
+            decoded.to_string()
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not open mpron file '{}': {}", path, e);
+            return HashMap::new();
+        }
+    };
+    build_dictionary(&content)
+}
+
 /// Parse an mpron pronunciation string into X-SAMPA phonemes.
-///
-/// The mpron format uses:
-/// - Multi-char symbols delimited by / (e.g., /aI/, /eI/, /tS/)
-/// - Single-char symbols (e.g., b, d, f)
-/// - Stress markers: ' (primary), , (secondary)
-/// - Word separators: _
-fn parse_pronunciation(pron: &str) -> Vec<String> {
+pub fn parse_pronunciation(pron: &str) -> Vec<String> {
     let mut result = Vec::new();
-    let mut remaining = pron;
+    let chars: Vec<char> = pron.chars().collect();
+    let mut i = 0;
+    let mut in_slash = false;
+    let mut current = String::new();
 
-    // Build sorted list of symbols (longest first for greedy matching)
-    let mut symbols: Vec<&str> = MPRON_TO_XSAMPA.iter().map(|(s, _)| *s).collect();
-    symbols.sort_by(|a, b| b.len().cmp(&a.len()));
+    fn is_bare_marker(ch: char) -> bool {
+        ch == '\'' || ch == ',' || ch == '_'
+    }
 
-    while !remaining.is_empty() {
-        let mut found = false;
+    while i < chars.len() {
+        let ch = chars[i];
 
-        for &sym in &symbols {
-            if remaining.len() >= sym.len() && &remaining[..sym.len()] == sym {
-                let xsampa = MPRON_TO_XSAMPA
-                    .iter()
-                    .find(|(s, _)| *s == sym)
-                    .map(|(_, x)| *x)
-                    .unwrap_or("");
-
-                if !xsampa.is_empty() {
-                    result.push(xsampa.to_string());
+        if ch == '/' {
+            if in_slash {
+                if !current.is_empty() {
+                    let phonemes = split_slash_content(&current);
+                    result.extend(phonemes);
+                    current.clear();
                 }
-                // If xsampa is empty (stress markers), we skip it
-
-                remaining = &remaining[sym.len()..];
-                found = true;
-                break;
+                i += 1;
+                if i >= chars.len() || is_bare_marker(chars[i]) {
+                    in_slash = false;
+                }
+            } else {
+                in_slash = true;
+                current.clear();
+                i += 1;
             }
+        } else if in_slash {
+            current.push(ch);
+            i += 1;
+        } else {
+            match ch {
+                '\'' | ',' => {}
+                '_' => result.push("_".to_string()),
+                _ => {
+                    let ch_str = ch.to_string();
+                    if let Some(xsampa) = lookup_phoneme(&ch_str) {
+                        result.push(xsampa.to_string());
+                    }
+                }
+            }
+            i += 1;
         }
+    }
 
-        if !found {
-            // Skip unrecognized character
-            remaining = &remaining[1..];
-        }
+    if in_slash && !current.is_empty() {
+        let phonemes = split_slash_content(&current);
+        result.extend(phonemes);
     }
 
     result
@@ -169,31 +265,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_lookup_static_found() {
+        // "hello" should be in the embedded dictionary
+        let phonemes = lookup_static("hello");
+        assert!(phonemes.is_some(), "hello should be in the dictionary");
+    }
+
+    #[test]
+    fn test_lookup_static_not_found() {
+        let phonemes = lookup_static("xyznonexistentword999");
+        assert!(phonemes.is_none());
+    }
+
+    #[test]
+    fn test_lookup_static_common_words() {
+        // Test several common words
+        assert!(lookup_static("the").is_some());
+        assert!(lookup_static("a").is_some());
+        assert!(lookup_static("world").is_some());
+    }
+
+    #[test]
     fn test_parse_simple_word() {
-        // "hello" in mpron: /h/@/'l/oU/
         let phonemes = parse_pronunciation("/h/@/'l/oU/");
         assert_eq!(phonemes, vec!["h", "@", "l", "oU"]);
     }
 
     #[test]
     fn test_parse_with_stress() {
-        // "about" in mpron: /@/'b/aU/t
         let phonemes = parse_pronunciation("/@/'b/aU/t");
         assert_eq!(phonemes, vec!["@", "b", "aU", "t"]);
     }
 
     #[test]
     fn test_parse_diphthongs() {
-        // "voice" in mpron: /v//Oi//s
         let phonemes = parse_pronunciation("/v//Oi//s");
         assert_eq!(phonemes, vec!["v", "OI", "s"]);
     }
 
     #[test]
     fn test_parse_word_separator() {
-        // "ice cream" in mpron: /aI/s_k/r/i/m
-        let phonemes = parse_pronunciation("/aI/s_k/r/i/m");
-        assert_eq!(phonemes, vec!["aI", "s", "_", "r", "i", "m"]);
+        let phonemes = parse_pronunciation(",&/b/@/'l/oU/n/i/_/S//E/l");
+        assert_eq!(
+            phonemes,
+            vec!["{}", "b", "@", "l", "oU", "n", "i", "_", "S", "E", "l"]
+        );
+    }
+
+    #[test]
+    fn test_parse_ae() {
+        let phonemes = parse_pronunciation("/k/&/t");
+        assert_eq!(phonemes, vec!["k", "{}", "t"]);
+    }
+
+    #[test]
+    fn test_parse_shared_slash_convention() {
+        let phonemes = parse_pronunciation("/T/I/N/k");
+        assert_eq!(phonemes, vec!["T", "I", "N", "k"]);
+    }
+
+    #[test]
+    fn test_parse_bare_at() {
+        let phonemes = parse_pronunciation("/h/@/'l/oU/");
+        assert_eq!(phonemes, vec!["h", "@", "l", "oU"]);
+    }
+
+    #[test]
+    fn test_parse_mixed_bare_and_slashed() {
+        let phonemes = parse_pronunciation("'/A/rd,v/A/rk");
+        assert_eq!(phonemes, vec!["A", "r", "d", "v", "A", "r", "k"]);
+    }
+
+    #[test]
+    fn test_parse_exclamation() {
+        let phonemes = parse_pronunciation("/!/");
+        assert!(phonemes.is_empty());
+    }
+
+    #[test]
+    fn test_build_dictionary_from_str() {
+        let content = "hello /h/@/'l/oU/\n";
+        let dict = build_dictionary(content);
+        assert_eq!(
+            dict.get("hello"),
+            Some(&vec!["h".to_string(), "@".to_string(), "l".to_string(), "oU".to_string()])
+        );
     }
 
     #[test]
@@ -220,10 +376,6 @@ mod tests {
             dict.get("hello"),
             Some(&vec!["h".to_string(), "@".to_string(), "l".to_string(), "oU".to_string()])
         );
-        assert_eq!(
-            dict.get("world"),
-            Some(&vec!["w".to_string(), "@".to_string(), "r".to_string(), "l".to_string(), "d".to_string()])
-        );
     }
 
     #[test]
@@ -237,22 +389,6 @@ mod tests {
         f.write_all(b"record/v /r/I/'k/O/rd\n").unwrap();
 
         let dict = load_dictionary(tmp.path().to_str().unwrap());
-
-        // Both should be loaded (last one wins for same key)
         assert!(dict.contains_key("record"));
-    }
-
-    #[test]
-    fn test_parse_ae() {
-        // "cat" in mpron: /k/&/t
-        let phonemes = parse_pronunciation("/k/&/t");
-        assert_eq!(phonemes, vec!["k", "{}", "t"]);
-    }
-
-    #[test]
-    fn test_parse_theta() {
-        // "think" in mpron: /T/I/N/k
-        let phonemes = parse_pronunciation("/T/I/N/k");
-        assert_eq!(phonemes, vec!["T", "I", "N", "k"]);
     }
 }

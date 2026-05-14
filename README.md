@@ -14,6 +14,11 @@ Choose a voice, paste in your lyrics using the paste button, and you're good to 
 
 <img src="image-1.png" alt="Reset example" width="200">
 
+
+Also worth noting that this is a real-time plugin, so it lacks the "look-ahead" functionality of the CLI/online semi-real time engine. Practically, it means you should shorten your notes slightly for a more natural sound and to combat lyric drift.
+
+<img src="image-2.png" alt="Reset example" width="300">
+
 ### How do I install it or build it?
 
 The [Releases](https://github.com/EuphoricPenguin/PlugOVR/releases) page has binaries built for Windows, but you should be able to build the source for other platforms.
@@ -29,4 +34,4 @@ The [voice source files](https://gitlab.com/oddvoices/oddvoices/-/tree/develop/v
 The Moby Pronunciator II [phonetic dictionary](https://github.com/elitejake/Moby-Project) is dedicated to the public domain.
 Third-party licenses apply to binary files: see THIRDPARTY.yml for more info.
 
-<sub>The 0.1 version of PlugOVR was created using a fully-local LLM toolchain consisting of Cline, Qwen-3.6-35B-A3B, and Grounded Docs MCP Server with Granite-Embedding-278m-multilingual. 0.2/0.3 had several minor issues fixed using DeepSeek V4 Flash and Gemini-3-Flash via Cline. The plugin frontend was created by DeepSeek V4 Flash via Cline.</sub>
+<sub>The 0.1 version of PlugOVR was created using a fully-local LLM toolchain consisting of Cline, Qwen-3.6-35B-A3B, and Grounded Docs MCP Server with Granite-Embedding-278m-multilingual. 0.2/0.3 had several minor issues fixed using DeepSeek V4 Flash/Pro and Gemini-3-Flash via Cline. The plugin frontend was created by DeepSeek V4 Flash via Cline.</sub>

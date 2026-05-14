@@ -109,12 +109,14 @@ impl SharedState {
     }
 }
 
-/// Discover .voice files in the compiled_voices directory.
+/// Discover .voice files alongside the executable and in the dev directory.
 fn discover_voices() -> Vec<String> {
     let paths = [
+        // Look alongside the executable (portable deployment)
         std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|p| p.join("compiled_voices"))),
+            .and_then(|p| p.parent().map(|p| p.to_path_buf())),
+        // Look in the dev compiled_voices directory
         Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin").join("compiled_voices")),
     ];
 
@@ -190,10 +192,6 @@ pub struct OddVoices {
 /// Manages the Synth and its relationship with the Voice.
 /// The Synth borrows the Voice, so we use unsafe to manage the lifetime.
 struct SynthManager {
-    /// The segment queue memory.
-    segment_queue_memory: Box<[i32]>,
-    /// Queue capacity.
-    queue_capacity: usize,
     /// The synth, with an extended lifetime.
     /// SAFETY: The synth borrows a Voice that is owned by the parent OddVoices struct.
     /// The Voice is never moved or dropped while this Synth exists.
@@ -223,8 +221,8 @@ impl Default for OddVoices {
 }
 
 impl Plugin for OddVoices {
-    const NAME: &'static str = "OddVoices";
-    const VENDOR: &'static str = "OddVoices Project";
+    const NAME: &'static str = "PlugOVR";
+    const VENDOR: &'static str = "EuphoricPenguin";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -253,14 +251,10 @@ impl Plugin for OddVoices {
     ) -> bool {
         self.sample_rate = config.sample_rate;
 
-        // Load the G2P dictionary from the mpron.txt file
-        let mpron_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("oddvoices")
-            .join("cmudict-0.7b");
-        if mpron_path.exists() {
-            self.g2p = Some(G2P::load(mpron_path.to_str().unwrap_or("")));
-        }
+        // Load the G2P dictionary — instant, zero allocation.
+        // The dictionary is compiled as a sorted static array (via build.rs),
+        // providing O(log n) binary search lookups with sub-microsecond latency.
+        self.g2p = Some(G2P::new());
 
         true
     }
@@ -302,7 +296,6 @@ impl Plugin for OddVoices {
             if let Some(voice) = &self.voice {
                 if voice.has_init_finished() {
                     let queue_size = 256;
-                    let mem: Box<[i32]> = vec![-1; queue_size].into_boxed_slice();
 
                     // SAFETY: The voice is owned by this struct and will outlive the synth.
                     // We extend the lifetime to 'static because the synth is stored alongside
@@ -320,8 +313,6 @@ impl Plugin for OddVoices {
                     );
                     if !synth.is_errored() {
                         self.synth = Some(Box::new(SynthManager {
-                            segment_queue_memory: mem,
-                            queue_capacity: queue_size,
                             synth,
                         }));
                     }
@@ -331,16 +322,25 @@ impl Plugin for OddVoices {
 
         // ── Handle reset trigger ──
         // Check both the BoolParam (for DAW automation) and the AtomicBool flag
-        // (for the editor button). The AtomicBool is a one-shot flag set by the
-        // editor and cleared here after processing.
+        // (for the editor button). The BoolParam uses rising-edge detection
+        // (false→true transition only) to avoid repeatedly force-stopping on
+        // every audio buffer while the parameter stays active. The AtomicBool
+        // is a one-shot flag set by the editor and cleared here after processing.
         let reset_value = self.params.reset.value();
         let reset_requested = self.shared.reset_requested.swap(false, Ordering::Relaxed);
-        if reset_value || reset_requested {
-            // Reset is active — keep syllable_index at 0 so the next note-on
-            // will play the first syllable/word in the lyrics. While the reset
-            // automation is HIGH, every note-on will play the first word.
-            // When reset goes LOW, syllable_index will advance normally.
-            self.syllable_index = 0;
+        if (reset_value && !self.last_reset) || reset_requested {
+            // Reset is active — force the synth back to the beginning of the
+            // flat phoneme list. Clear the queue and re-queue the entire flat
+            // list so the next note-on starts from the first syllable.
+            if let Some(sm) = &mut self.synth {
+                sm.synth.force_stop();
+                if !self.syllable_segments.is_empty() {
+                    let segments = &self.syllable_segments[0];
+                    for seg in segments {
+                        sm.synth.queue_segment(*seg);
+                    }
+                }
+            }
         }
         self.last_reset = reset_value;
 
@@ -412,7 +412,11 @@ impl Plugin for OddVoices {
 }
 
 impl OddVoices {
-    /// Rebuild the pre-computed segment indices for each syllable/word in the lyrics.
+    /// Rebuild the pre-computed flat segment list for the entire lyrics text.
+    /// This matches the original OddVoices behavior: the entire lyrics are
+    /// processed through G2P as one stream, producing a single flat list of
+    /// segment indices. The Synth's new_syllable() method then advances through
+    /// this list one syllable (vowel group) at a time on each noteOn.
     /// This is called whenever the lyrics text changes.
     fn rebuild_syllable_segments(&mut self, lyrics: &str) {
         self.syllable_segments.clear();
@@ -424,18 +428,29 @@ impl OddVoices {
         let g2p = self.g2p.as_ref().unwrap();
         let voice = self.voice.as_ref().unwrap();
 
-        // Split lyrics by whitespace or hyphens into syllables/words
-        let syllables: Vec<&str> = lyrics.split(&[' ', '-'][..]).filter(|s| !s.is_empty()).collect();
+        // Process the entire lyrics text through G2P as one flat stream,
+        // matching the original C++ behavior (see sing.cpp).
+        let phonemes = g2p.pronounce(lyrics);
+        let phoneme_strs: Vec<&str> = phonemes.iter().map(|s| s.as_str()).collect();
+        let segments = voice.convert_phonemes_to_segment_indices(&phoneme_strs);
 
-        for syllable in &syllables {
-            let phonemes = g2p.pronounce(syllable);
-            let phoneme_strs: Vec<&str> = phonemes.iter().map(|s| s.as_str()).collect();
-            let segments = voice.convert_phonemes_to_segment_indices(&phoneme_strs);
-            self.syllable_segments.push(segments);
+        // Store as a single flat list (one entry in syllable_segments).
+        // The Synth's new_syllable() will advance through this list one
+        // syllable at a time on each noteOn.
+        self.syllable_segments.push(segments.clone());
+
+        // If the synth is already initialized, queue the entire flat list
+        // so the Synth can play through it continuously, matching the
+        // original C++ behavior where the entire segment queue is pre-loaded.
+        if let Some(sm) = &mut self.synth {
+            sm.synth.clear_queue();
+            for seg in &segments {
+                sm.synth.queue_segment(*seg);
+            }
         }
     }
 
-    fn handle_note_on(&mut self, note: u8, lyrics: &str) {
+    fn handle_note_on(&mut self, note: u8, _lyrics: &str) {
         self.active_note = Some(note);
         self.note_freq = util::midi_note_to_freq(note);
         self.note_on = true;
@@ -445,64 +460,31 @@ impl OddVoices {
             // Set frequency
             sm.synth.set_frequency_immediate(self.note_freq);
 
-            // Clear any remaining segments from the previous syllable
-            // before queuing the new syllable's segments.
-            sm.synth.clear_queue();
-
-            // Use pre-computed syllable segments if available, otherwise
-            // fall back to on-the-fly conversion
-            if !self.syllable_segments.is_empty() {
-                // Loop syllables if we've reached the end
-                if self.syllable_index >= self.syllable_segments.len() {
-                    self.syllable_index = 0;
-                }
-
-                let segments = &self.syllable_segments[self.syllable_index];
-
-                // Queue all segments for this syllable
+            // If we have pre-computed segments, the entire flat list is already
+            // queued in the Synth (loaded in rebuild_syllable_segments). We do NOT
+            // clear the queue here — the Synth's new_syllable() will advance through
+            // the queue one syllable at a time, matching the original C++ behavior.
+            //
+            // If the queue is empty (e.g. we've played through all syllables and
+            // wrapped around), re-queue from the beginning.
+            if sm.synth.queue_empty() && !self.syllable_segments.is_empty() {
+                let segments = &self.syllable_segments[0];
                 for seg in segments {
                     sm.synth.queue_segment(*seg);
                 }
-
-                self.syllable_index += 1;
-            } else if !lyrics.is_empty() {
-                // Fallback: on-the-fly conversion (shouldn't normally be needed)
-                if let Some(g2p) = &self.g2p {
-                    let syllables: Vec<&str> = lyrics.split(&[' ', '-'][..]).filter(|s| !s.is_empty()).collect();
-
-                    if !syllables.is_empty() {
-                        if self.syllable_index >= syllables.len() {
-                            self.syllable_index = 0;
-                        }
-
-                        let syllable = syllables[self.syllable_index];
-                        let phonemes = g2p.pronounce(syllable);
-
-                        if let Some(voice) = &self.voice {
-                            let phoneme_strs: Vec<&str> = phonemes.iter().map(|s| s.as_str()).collect();
-                            let segments = voice.convert_phonemes_to_segment_indices(&phoneme_strs);
-
-                            for seg in &segments {
-                                sm.synth.queue_segment(*seg);
-                            }
-                        }
-
-                        self.syllable_index += 1;
-                    }
-                }
             }
 
-            // Trigger note on with a finite duration based on the note length.
-            // We use a default duration of 0.5 seconds, which will be refined
-            // when the note-off event arrives. The synth's new_syllable() will
-            // calculate phoneme_speed to fit the syllable within this duration.
+            // Use indefinite note-on (duration = 0.0), matching the original C++
+            // NoteOnRT behavior. This means new_syllable() will pop one segment
+            // at a time from the queue, and the vowel will loop indefinitely
+            // until note_off() is called. The phoneme speed stays at 1.0,
+            // so consonants play at their natural speed.
             //
-            // Using a finite duration (rather than indefinite) makes the synth
-            // behave like the original OddVoices: the vowel plays for the
-            // specified time, then automatically transitions to the final
-            // consonant cluster, and then advances to the next segment.
-            // This ensures the entire word is played within the note's duration.
-            sm.synth.note_on(0.5);
+            // In the original C++ singMIDI(), the offline NoteOn uses the actual
+            // note duration to calculate phoneme_speed. But in a real-time VST,
+            // we don't know the duration at NoteOn time, so we use the real-time
+            // approach (NoteOnRT/NoteOffRT) instead.
+            sm.synth.note_on_indefinite();
         }
     }
 
@@ -524,14 +506,14 @@ impl OddVoices {
 }
 
 impl Vst3Plugin for OddVoices {
-    const VST3_CLASS_ID: [u8; 16] = *b"OddVoicesVST3X!!";
+    const VST3_CLASS_ID: [u8; 16] = *b"plugovrplugovr!!";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Synth, Vst3SubCategory::Mono];
 }
 
 impl ClapPlugin for OddVoices {
-    const CLAP_ID: &'static str = "com.oddvoices.plugin";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("OddVoices singing synthesizer");
+    const CLAP_ID: &'static str = "com.euphoricpenguin.plugovr";
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("PlugOVR singing synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[
