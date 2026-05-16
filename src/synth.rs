@@ -3,7 +3,6 @@
 /// The Synth orchestrates grain scheduling, segment queue consumption,
 /// crossfade transitions, vowel looping, and all the note-on/note-off/phoneme-speed
 /// formant-shift logic.
-
 use crate::deque::Deque;
 use crate::grain::Grain;
 use crate::pitch::Pitch;
@@ -230,7 +229,7 @@ impl<'a> Synth<'a> {
             // don't do this.
             if self.voice.segment_is_vowel(self.segment as usize)
                 && self.syllable_time_remaining <= 0.0
-                && !(self.syllable_duration <= 0.0)
+                && self.syllable_duration > 0.0
             {
                 self.new_segment();
             }
@@ -262,11 +261,11 @@ impl<'a> Synth<'a> {
             let crossfade_offset = if self.old_segment == self.silent_segment_index {
                 -1i32
             } else {
-                old_offset as i32
+                old_offset
             };
 
             self.grains[self.next_grain]
-                .play(offset as i32, crossfade_offset, self.crossfade, rate);
+                .play(offset, crossfade_offset, self.crossfade, rate);
             self.next_grain = (self.next_grain + 1) % self.max_grains;
         }
 
@@ -294,11 +293,7 @@ impl<'a> Synth<'a> {
         // ~2 billion — causing the loud peaking and buzzy artifacts.
         const I16_MAX: i32 = i16::MAX as i32;
         const I16_MIN: i32 = i16::MIN as i32;
-        if result > I16_MAX {
-            result = I16_MAX;
-        } else if result < I16_MIN {
-            result = I16_MIN;
-        }
+        result = result.clamp(I16_MIN, I16_MAX);
 
         result
     }
@@ -411,7 +406,7 @@ impl<'a> Synth<'a> {
             if i >= self.segment_queue.size() {
                 break;
             }
-            let segment_index = self.segment_queue.get(i) as i32;
+            let segment_index = self.segment_queue.get(i);
             if self.voice.segment_is_vowel(segment_index as usize) {
                 break;
             }
@@ -431,7 +426,7 @@ impl<'a> Synth<'a> {
             if i >= self.segment_queue.size() {
                 break;
             }
-            let segment_index = self.segment_queue.get(i) as i32;
+            let segment_index = self.segment_queue.get(i);
             if segment_index == self.silent_segment_index {
                 upcoming_vowel_is_silence = true;
                 break;
@@ -449,7 +444,7 @@ impl<'a> Synth<'a> {
         }
 
         for j in 0..consonant_cluster_size_in_segments {
-            let segment_index = self.segment_queue.get(consonant_cluster_first_index + j) as i32;
+            let segment_index = self.segment_queue.get(consonant_cluster_first_index + j);
             let seg_frames = self.voice.segment_num_frames(segment_index as usize) as f32;
             final_consonant_duration += seg_frames / self.original_f0 - self.crossfade_length;
         }
@@ -514,8 +509,6 @@ impl<'a> Synth<'a> {
             frame_index % segment_num_frames
         };
         let segment_offset = self.voice.segment_offset(segment as usize);
-        let offset = segment_offset
-            + (frame_index as i32) * (self.voice.grain_length() as i32);
-        offset
+        segment_offset + frame_index * self.voice.grain_length()
     }
 }

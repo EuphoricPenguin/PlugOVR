@@ -6,7 +6,7 @@ use nih_plug_egui::{create_egui_editor, EguiState};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::plugin::{OddVoicesParams, SharedState};
+use crate::plugin::{get_plugin_directory, OddVoicesParams, SharedState};
 
 /// Create the egui editor for the plugin.
 pub fn create_editor(
@@ -111,27 +111,19 @@ pub fn create_editor(
 }
 
 /// Resolve a voice name to its full file path.
+///
+/// Only searches the single directory where the VST3/CLAP binary lives.
 fn resolve_voice_path(voice_name: &str) -> PathBuf {
-    // Try the cargo manifest directory first (for development)
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dev_path = manifest_dir
-        .join("bin")
-        .join("compiled_voices")
-        .join(format!("{}.voice", voice_name));
-    if dev_path.exists() {
-        return dev_path;
+    let voice_file = format!("{}.voice", voice_name);
+
+    if let Some(dll_dir) = get_plugin_directory() {
+        let path = dll_dir.join(&voice_file);
+        return path;
     }
 
-    // Look alongside the executable (portable deployment)
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let exe_path = exe_dir.join(format!("{}.voice", voice_name));
-            return exe_path;
-        }
-    }
-
-    // Last resort: return the dev path anyway
-    dev_path
+    // Fallback: return relative to DLL directory anyway (this path will be wrong
+    // but preserves the old behavior for the error case)
+    PathBuf::from(voice_file)
 }
 
 /// State for the egui editor.

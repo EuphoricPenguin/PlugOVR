@@ -109,20 +109,65 @@ impl SharedState {
     }
 }
 
-/// Discover .voice files alongside the executable and in the dev directory.
-fn discover_voices() -> Vec<String> {
-    let paths = [
-        // Look alongside the executable (portable deployment)
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf())),
-        // Look in the dev compiled_voices directory
-        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin").join("compiled_voices")),
-    ];
+/// Get the directory containing the plugin DLL at runtime.
+/// This works by finding the module handle of the current code and resolving its path.
+/// Returns None if the platform-specific detection fails.
+pub(crate) fn get_plugin_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
 
+        extern "system" {
+            fn GetModuleHandleExW(
+                dwFlags: u32,
+                lpModuleName: *const std::ffi::c_void,
+                phModule: *mut *mut std::ffi::c_void,
+            ) -> i32;
+            fn GetModuleFileNameW(
+                hModule: *mut std::ffi::c_void,
+                lpFilename: *mut u16,
+                nSize: u32,
+            ) -> u32;
+        }
+
+        // Use our own function address to identify the plugin DLL.
+        // #[inline(never)] prevents LTO from merging/eliminating this function.
+        #[inline(never)]
+        fn dummy_for_module_addr() {}
+        let fn_ptr = dummy_for_module_addr as *const std::ffi::c_void;
+
+        unsafe {
+            let mut hmodule: *mut std::ffi::c_void = std::ptr::null_mut();
+            // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS (4) | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT (2)
+            const FLAGS: u32 = 0x0000_0004 | 0x0000_0002;
+            if GetModuleHandleExW(FLAGS, fn_ptr, &mut hmodule) == 0 {
+                return None;
+            }
+
+            let mut buf = vec![0u16; 1024];
+            let len = GetModuleFileNameW(hmodule, buf.as_mut_ptr(), buf.len() as u32);
+            if len == 0 || len as usize >= buf.len() {
+                return None;
+            }
+            let path = OsString::from_wide(&buf[..len as usize]);
+            PathBuf::from(path).parent().map(|p| p.to_path_buf())
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // On Linux/macOS, try dladdr to find the shared library path.
+        None
+    }
+}
+
+/// Discover .voice files in the plugin DLL directory.
+/// Only searches the single directory where the VST3/CLAP binary lives.
+fn discover_voices() -> Vec<String> {
     let mut voices = Vec::new();
-    for base in paths.iter().flatten() {
-        if let Ok(entries) = std::fs::read_dir(base) {
+    if let Some(dll_dir) = get_plugin_directory() {
+        if let Ok(entries) = std::fs::read_dir(&dll_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("voice") {

@@ -97,12 +97,12 @@ impl Pitch {
         let mut rng = StdRng::seed_from_u64(0);
         let dist = Uniform::new(-1.0f32, 1.0f32).unwrap();
 
-        let drift_lfo_value1: f32 = rng.sample(dist.clone());
+        let drift_lfo_value1: f32 = rng.sample(dist);
         let drift_lfo_value2: f32 = rng.sample(dist);
 
         Self {
             sample_rate,
-            rng: rng,
+            rng,
             state: PitchState::Silent,
             base_portamento_time: 0.1,
             preparation_time_ratio: 0.5,
@@ -231,7 +231,7 @@ impl Pitch {
         // Jitter (random walk, clamped)
         let dist = Uniform::new(-1.0f32, 1.0f32).unwrap();
         self.jitter_value += self.rng.sample(dist) / self.sample_rate;
-        self.jitter_value = self.jitter_value.max(-1.0).min(1.0);
+        self.jitter_value = self.jitter_value.clamp(-1.0, 1.0);
         let jitter = self.jitter_value * self.jitter_amplitude;
         result *= 1.0 + jitter;
 

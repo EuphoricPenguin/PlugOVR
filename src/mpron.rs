@@ -16,7 +16,6 @@
 /// - Single-char phonemes may appear bare (outside slashes): b, d, k, @
 /// - Stress markers: ' (primary), , (secondary) — bare, always stripped
 /// - Underscore _ separates words in compound pronunciations
-
 use std::collections::HashMap;
 
 // Auto-generated sorted dictionary array (build.rs)
@@ -111,7 +110,7 @@ fn split_slash_content(content: &str) -> Vec<String> {
 
     // Build sorted list of identifiers, longest first
     let mut ids: Vec<&str> = NAKED_TO_XSAMPA.iter().map(|(k, _)| *k).collect();
-    ids.sort_by(|a, b| b.len().cmp(&a.len()));
+    ids.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     while !remaining.is_empty() {
         let mut found = false;

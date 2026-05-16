@@ -20,6 +20,12 @@ pub struct Grain {
     rate: f32,
 }
 
+impl Default for Grain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Grain {
     pub fn new() -> Self {
         Self {

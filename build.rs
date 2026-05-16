@@ -180,7 +180,7 @@ fn split_slash_content(content: &str) -> Vec<String> {
 
     // Build sorted list of multi-char identifiers, longest first
     let mut ids: Vec<&str> = NAKED_TO_XSAMPA.iter().map(|(k, _)| *k).collect();
-    ids.sort_by(|a, b| b.len().cmp(&a.len()));
+    ids.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     while !remaining.is_empty() {
         let mut found = false;

@@ -5,7 +5,7 @@
 
 fn main() {
     eprintln!("OddVoices plugin - use as VST3 or CLAP in a DAW");
-    eprintln!("");
+    eprintln!();
     eprintln!("To build:");
     eprintln!("  cargo build --release");
     eprintln!("  The .vst3 and .clap files will be in target/release/");

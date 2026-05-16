@@ -2,7 +2,6 @@
 ///
 /// Parses the `.voice` binary file format and provides lookup tables
 /// for segments, phonemes, and the wavetable memory.
-
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -54,6 +53,12 @@ pub struct Voice {
     segments_is_vowel: Vec<bool>,
     segments_offset: Vec<i32>,
     wavetable_memory: Vec<i16>,
+}
+
+impl Default for Voice {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Voice {
@@ -405,11 +410,14 @@ impl Voice {
         let mut last_segment_index: i32 = -1; // k_noSegment equivalent
         let silent_idx = self.silent_segment_index;
         for (i, segment_index) in segment_indices.iter().enumerate() {
-            if !(*segment_index == silent_idx
-                && *segment_index == last_segment_index)
-                && !(*segment_index == silent_idx && i == 0)
-                && !(*segment_index == silent_idx
-                    && i == segment_indices.len() - 1)
+            // Push unless this is a silent segment that is:
+            //   - a duplicate of the previous silent segment, OR
+            //   - the first entry, OR
+            //   - the last entry
+            if *segment_index != silent_idx
+                || (*segment_index != last_segment_index
+                    && i != 0
+                    && i != segment_indices.len() - 1)
             {
                 segment_indices_pass2.push(*segment_index);
             }

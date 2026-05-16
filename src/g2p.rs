@@ -101,7 +101,7 @@ fn dictionary_exceptions() -> std::collections::HashMap<&'static str, Vec<&'stat
 }
 
 /// Perform the cot-caught merger: /O/ -> /A/ (or /oU/ before /r/).
-fn perform_cot_caught_merger(pronunciation: &mut Vec<String>) {
+fn perform_cot_caught_merger(pronunciation: &mut [String]) {
     let len = pronunciation.len();
     for i in 0..len {
         if pronunciation[i] == "O" {
@@ -234,6 +234,12 @@ fn pronounce_oov(word: &str) -> Vec<String> {
 /// Unlike the old HashMap-based G2P, this struct has **zero initialization
 /// cost** — all dictionary lookups use `mpron::lookup_static()` directly.
 pub struct G2P;
+
+impl Default for G2P {
+    fn default() -> Self {
+        G2P
+    }
+}
 
 impl G2P {
     /// Create a new G2P instance (instant — zero allocation).
